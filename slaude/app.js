@@ -70,6 +70,8 @@ app.post('/(.*)/chat/completions', async (req, res, next) => {
             pingMessage = promptMessages.pop();
         }
 
+        // console.log(pingMessage)
+
         if (promptMessages.length > 1) {
             for (let i = 1; i < promptMessages.length; i++) {
                 await createSlackReply(promptMessages[i], tsThread);
@@ -108,6 +110,7 @@ app.post('/(.*)/chat/completions', async (req, res, next) => {
             }
         });
 
+        // console.log(pingMessage)
         await createClaudePing(pingMessage, tsThread);
         console.log(`Created Claude ping on thread ${tsThread}`);
     } catch (error) {
@@ -381,6 +384,7 @@ function convertToPrompt(msg) {
 
 function preparePingMessage(msg) {
     const claudePing = `<@${config.CLAUDE_USER}>`;
+    console.log(claudePing);
     let claudePingMatch = msg.match(/@Claude/i);
     if (claudePingMatch === null) {
         return `${claudePing} ${msg}`;

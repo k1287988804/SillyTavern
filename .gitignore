@@ -19,3 +19,5 @@ whitelist.txt
 .vscode
 secrets.json
 /dist
+poe_device.json
+/backups/

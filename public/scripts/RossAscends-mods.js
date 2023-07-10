@@ -11,8 +11,8 @@ import {
     is_send_press,
     getTokenCount,
     menu_type,
-
-
+    max_context,
+    saveSettingsDebounced,
 } from "../script.js";
 
 
@@ -21,13 +21,14 @@ import {
     send_on_enter_options,
 } from "./power-user.js";
 
-import { LoadLocal, SaveLocal, ClearLocal, CheckLocal, LoadLocalBool } from "./f-localStorage.js";
+import { LoadLocal, SaveLocal, CheckLocal, LoadLocalBool } from "./f-localStorage.js";
 import { selected_group, is_group_generating, getGroupAvatar, groups } from "./group-chats.js";
 import {
     SECRET_KEYS,
     secret_state,
 } from "./secrets.js";
-import { sortByCssOrder } from "./utils.js";
+import { sortByCssOrder, debounce, delay } from "./utils.js";
+import { chat_completion_sources, oai_settings } from "./openai.js";
 
 var NavToggle = document.getElementById("nav-toggle");
 
@@ -60,6 +61,7 @@ var retry_delay = 500;
 var RA_AC_retries = 1;
 
 const observerConfig = { childList: true, subtree: true };
+const countTokensDebounced = debounce(RA_CountCharTokens, 1000);
 
 const observer = new MutationObserver(function (mutations) {
     mutations.forEach(function (mutation) {
@@ -70,7 +72,6 @@ const observer = new MutationObserver(function (mutations) {
         } else if (mutation.target.parentNode === SelectedCharacterTab) {
             setTimeout(RA_CountCharTokens, 200);
         }
-
     });
 });
 
@@ -79,7 +80,7 @@ observer.observe(document.documentElement, observerConfig);
 /**
  * Wait for an element before resolving a promise
  * @param {String} querySelector - Selector of element to wait for
- * @param {Integer} timeout - Milliseconds to wait before timing out, or 0 for no timeout              
+ * @param {Integer} timeout - Milliseconds to wait before timing out, or 0 for no timeout
  */
 function waitForElement(querySelector, timeout) {
     return new Promise((resolve, reject) => {
@@ -103,22 +104,6 @@ function waitForElement(querySelector, timeout) {
     });
 }
 
-waitForElement("#expression-image", 10000).then(function () {
-
-    dragElement(document.getElementById("expression-holder"));
-    dragElement(document.getElementById("floatingPrompt"));
-
-}).catch(() => {
-    console.log("expression holder not loaded yet");
-});
-
-waitForElement("#floatingPrompt", 10000).then(function () {
-
-    dragElement(document.getElementById("floatingPrompt"));
-
-}).catch(() => {
-    console.log("floating prompt box not loaded yet");
-});
 
 // Device detection
 export const deviceInfo = await getDeviceInfo();
@@ -176,6 +161,29 @@ export function humanizedDateTime() {
     return HumanizedDateTime;
 }
 
+//this is a common format version to display a timestamp on each chat message
+//returns something like: June 19, 2023 2:20pm
+export function getMessageTimeStamp() {
+    const date = Date.now();
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const d = new Date(date);
+    const month = months[d.getMonth()];
+    const day = d.getDate();
+    const year = d.getFullYear();
+    let hours = d.getHours();
+    const minutes = ('0' + d.getMinutes()).slice(-2);
+    let meridiem = 'am';
+    if (hours >= 12) {
+        meridiem = 'pm';
+        hours -= 12;
+    }
+    if (hours === 0) {
+        hours = 12;
+    }
+    const formattedDate = month + ' ' + day + ', ' + year + ' ' + hours + ':' + minutes + meridiem;
+    return formattedDate;
+}
+
 
 // triggers:
 $("#rm_button_create").on("click", function () {                 //when "+New Character" is clicked
@@ -191,9 +199,9 @@ $("#rm_button_create").on("click", function () {                 //when "+New Ch
     $("#result_info").html('Type to start counting tokens!');
 });
 //when any input is made to the create/edit character form textareas
-$("#rm_ch_create_block").on("input", function () { RA_CountCharTokens(); });
+$("#rm_ch_create_block").on("input", function () { countTokensDebounced(); });
 //when any input is made to the advanced editing popup textareas
-$("#character_popup").on("input", function () { RA_CountCharTokens(); });
+$("#character_popup").on("input", function () { countTokensDebounced(); });
 //function:
 export function RA_CountCharTokens() {
     $("#result_info").html("");
@@ -259,16 +267,23 @@ export function RA_CountCharTokens() {
                 (power_user.pin_examples ? characters[this_chid].mes_example : ''),
             ].join('\n').replace(/\r/gm, '').trim();
             perm_tokens = getTokenCount(perm_string);
-        } else { console.log("RA_TC -- no valid char found, closing."); }                // if neither, probably safety char or some error in loading
+            // if neither, probably safety char or some error in loading
+        } else { console.debug("RA_TC -- no valid char found, closing."); }
     }
     // display the counted tokens
-    if (count_tokens < 1024 && perm_tokens < 1024) {
-        $("#result_info").html(count_tokens + " Tokens (" + perm_tokens + " Permanent Tokens)");      //display normal if both counts are under 1024
+    const tokenLimit = Math.max(((main_api !== 'openai' ? max_context : oai_settings.openai_max_context) / 2), 1024);
+    if (count_tokens < tokenLimit && perm_tokens < tokenLimit) {
+        $("#result_info").html(`<small>${count_tokens} Tokens (${perm_tokens} Permanent)</small>`);
     } else {
         $("#result_info").html(`
-        <span class="neutral_warning">${count_tokens}</span>&nbsp;Tokens (<span class="neutral_warning">${perm_tokens}</span><span>&nbsp;Permanent Tokens)
-        <br>
-        <div id="chartokenwarning" class="menu_button whitespacenowrap"><a href="/notes#charactertokens" target="_blank">Learn More About Token 'Limits'</a></div>`);
+        <div class="flex-container alignitemscenter">
+            <div class="flex-container flexnowrap flexNoGap">
+                <small class="flex-container flexnowrap flexNoGap">
+                    <div class="neutral_warning">${count_tokens}</div>&nbsp;Tokens (<div class="neutral_warning">${perm_tokens}</div><div>&nbsp;Permanent)</div>
+                </small>
+            </div>
+            <div id="chartokenwarning" class="menu_button margin0 whitespacenowrap"><a href="https://docs.sillytavern.app/usage/core-concepts/characterdesign/#character-tokens" target="_blank">About Token 'Limits'</a></div>
+        </div>`);
     } //warn if either are over 1024
 }
 //Auto Load Last Charcter -- (fires when active_character is defined and auto_load_chat is true)
@@ -283,7 +298,7 @@ async function RA_autoloadchat() {
             $(groupToAutoLoad).click();
         }
 
-        // if the charcter list hadn't been loaded yet, try again. 
+        // if the charcter list hadn't been loaded yet, try again.
     } else { setTimeout(RA_autoloadchat, 100); }
 }
 
@@ -348,7 +363,7 @@ function RA_checkOnlineStatus() {
         connection_made = false;
     } else {
         if (online_status !== undefined && online_status !== "no_connection") {
-            $("#send_textarea").attr("placeholder", "Type a message..."); //on connect, placeholder tells user to type message
+            $("#send_textarea").attr("placeholder", `Type a message, or /? for command list`); //on connect, placeholder tells user to type message
             $('#send_form').removeClass("no-connection");
             $("#API-status-top").removeClass("fa-plug-circle-exclamation redOverlayGlow");
             $("#API-status-top").addClass("fa-plug");
@@ -388,7 +403,7 @@ function RA_autoconnect(PrevApi) {
                 }
                 break;
             case 'openai':
-                if (secret_state[SECRET_KEYS.OPENAI]) {
+                if (secret_state[SECRET_KEYS.OPENAI] || secret_state[SECRET_KEYS.CLAUDE] || oai_settings.chat_completion_source == chat_completion_sources.WINDOWAI) {
                     $("#api_button_openai").click();
                 }
                 break;
@@ -428,13 +443,13 @@ function OpenNavPanels() {
 
         //auto-open L nav if locked and previously open
         if (LoadLocalBool("LNavLockOn") == true && LoadLocalBool("LNavOpened") == true) {
-            console.log("RA -- clicking left nav to open");
+            console.debug("RA -- clicking left nav to open");
             $("#leftNavDrawerIcon").click();
         }
 
         //auto-open WI if locked and previously open
         if (LoadLocalBool("WINavLockOn") == true && LoadLocalBool("WINavOpened") == true) {
-            console.log("RA -- clicking WI to open");
+            console.debug("RA -- clicking WI to open");
             $("#WIDrawerIcon").click();
         }
     }
@@ -442,151 +457,221 @@ function OpenNavPanels() {
 
 
 // Make the DIV element draggable:
-dragElement(document.getElementById("sheld"));
-dragElement(document.getElementById("left-nav-panel"));
-dragElement(document.getElementById("right-nav-panel"));
-dragElement(document.getElementById("avatar_zoom_popup"));
-dragElement(document.getElementById("WorldInfo"));
 
+// THIRD UPDATE, prevent resize window breaks and smartly handle saving
 
-
-function dragElement(elmnt) {
+export function dragElement(elmnt) {
+    var hasBeenDraggedByUser = false;
+    var isMouseDown = false;
 
     var pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-    if (document.getElementById(elmnt.id + "header")) { //ex: id="sheldheader"
-        // if present, the header is where you move the DIV from, but this overrides everything else:
-        document.getElementById(elmnt.id + "header").onmousedown = dragMouseDown;
+    var height, width, top, left, right, bottom,
+        maxX, maxY, winHeight, winWidth,
+        topBarFirstX, topBarLastX, sheldWidth;
+
+    var elmntName = elmnt.attr('id');
+
+    const elmntNameEscaped = $.escapeSelector(elmntName);
+    const elmntHeader = $(`#${elmntNameEscaped}header`);
+
+    if (elmntHeader.length) {
+        elmntHeader.off('mousedown').on('mousedown', (e) => {
+
+            dragMouseDown(e);
+        });
+        $(elmnt).off('mousedown').on('mousedown', () => { isMouseDown = true })
     } else {
-        // otherwise, move the DIV from anywhere inside the DIV, b:
-        elmnt.onmousedown = dragMouseDown;
+        elmnt.off('mousedown').on('mousedown', dragMouseDown);
     }
 
+    const observer = new MutationObserver((mutations) => {
+        const target = mutations[0].target;
+        if (!$(target).is(':visible')
+            || $(target).hasClass('resizing')
+            || Number((String(target.height).replace('px', ''))) < 50
+            || Number((String(target.width).replace('px', ''))) < 50
+            || power_user.movingUI === false
+            || isMobile() === true
+        ) {
+            console.debug('aborting mutator')
+            return
+        }
+        //console.debug(left + width, winWidth, hasBeenDraggedByUser, isMouseDown)
+        const style = getComputedStyle(target); //use computed values because not all CSS are set by default
+        height = target.offsetHeight;
+        width = target.offsetWidth;
+        top = parseInt(style.top);
+        left = parseInt(style.left);
+        right = parseInt(style.right);
+        bottom = parseInt(style.bottom);
+        maxX = parseInt(width + left);
+        maxY = parseInt(height + top);
+        winWidth = window.innerWidth;
+        winHeight = window.innerHeight;
+        sheldWidth = parseInt($('html').css('--sheldWidth').slice(0, -2));
+        topBarFirstX = (winWidth - sheldWidth) / 2;
+        topBarLastX = topBarFirstX + sheldWidth;
+
+        //prepare an empty poweruser object for the item being altered if we don't have one already
+        if (!power_user.movingUIState[elmntName]) {
+            console.debug(`adding config property for ${elmntName}`)
+            power_user.movingUIState[elmntName] = {};
+        }
+
+        //only record position changes if caused by a user click-drag
+        if (hasBeenDraggedByUser && isMouseDown) {
+            power_user.movingUIState[elmntName].top = top;
+            power_user.movingUIState[elmntName].left = left;
+            power_user.movingUIState[elmntName].right = right;
+            power_user.movingUIState[elmntName].bottom = bottom;
+            power_user.movingUIState[elmntName].margin = 'unset';
+        }
+
+        //handle resizing
+        if (!hasBeenDraggedByUser && isMouseDown) {
+            console.log('saw resize, NOT header drag')
+            //set css to prevent weird resize behavior (does not save)
+            elmnt.css('left', left)
+            elmnt.css('top', top)
+
+            //prevent resizing offscreen
+            if (top + elmnt.height() >= winHeight) {
+                elmnt.css('height', winHeight - top - 1 + "px");
+            }
+
+            if (left + elmnt.width() >= winWidth) {
+                elmnt.css('width', winWidth - left - 1 + "px");
+            }
+
+            //prevent resizing into the top bar
+            if (top <= 40 && maxX > topBarFirstX) {
+                elmnt.css('width', width - 1 + "px");
+            }
+            //set a listener for mouseup to save new width/height
+            elmnt.off('mouseup').on('mouseup', () => {
+                console.debug(`Saving ${elmntName} Height/Width`)
+                power_user.movingUIState[elmntName].width = width;
+                power_user.movingUIState[elmntName].height = height;
+                saveSettingsDebounced();
+            })
+        }
+
+        //handle dragging hit detection
+        if (hasBeenDraggedByUser && isMouseDown) {
+            //prevent dragging offscreen
+            if (top <= 0) {
+                elmnt.css('top', '0px');
+            } else if (maxY >= winHeight) {
+                elmnt.css('top', winHeight - maxY + top - 1 + "px");
+            }
+
+            if (left <= 0) {
+                elmnt.css('left', '0px');
+            } else if (maxX >= winWidth) {
+                elmnt.css('left', winWidth - maxX + left - 1 + "px");
+            }
+
+            //prevent underlap with topbar div
+            if (top < 40 && (maxX > topBarFirstX && maxX < topBarLastX || left < topBarLastX && left > topBarFirstX)) {
+                console.log('saw topbar hit')
+                elmnt.css('top', '42px');
+            }
+        }
+
+        // Check if the element header exists and set the listener on the grabber
+        if (elmntHeader.length) {
+            elmntHeader.off('mousedown').on('mousedown', (e) => {
+                console.debug('listener started from header')
+                dragMouseDown(e);
+            });
+        } else {
+            elmnt.off('mousedown').on('mousedown', dragMouseDown);
+        }
+    });
+
+    observer.observe(elmnt.get(0), { attributes: true, attributeFilter: ['style'] });
+
     function dragMouseDown(e) {
-        //console.log(e);
-        e = e || window.event;
-        e.preventDefault();
-        // get the mouse cursor position at startup:
-        pos3 = e.clientX; //mouse X at click
-        pos4 = e.clientY; //mouse Y at click
-        document.onmouseup = closeDragElement;
-        // call a function whenever the cursor moves:
-        document.onmousemove = elementDrag;
+
+        if (e) {
+            hasBeenDraggedByUser = true;
+            e.preventDefault();
+            pos3 = e.clientX; //mouse X at click
+            pos4 = e.clientY; //mouse Y at click
+        }
+        $(document).on('mouseup', closeDragElement);
+        $(document).on('mousemove', elementDrag);
     }
 
     function elementDrag(e) {
-        //disable scrollbars when dragging to prevent jitter
-        $("body").css("overflow", "hidden");
+        if (!power_user.movingUIState[elmntName]) {
+            power_user.movingUIState[elmntName] = {};
+        }
 
-
-        //get window size
-        let winWidth = window.innerWidth;
-        let winHeight = window.innerHeight;
-
-        //get necessary data for calculating element footprint
-        let draggableHeight = parseInt(getComputedStyle(elmnt).getPropertyValue('height').slice(0, -2));
-        let draggableWidth = parseInt(getComputedStyle(elmnt).getPropertyValue('width').slice(0, -2));
-        let draggableTop = parseInt(getComputedStyle(elmnt).getPropertyValue('top').slice(0, -2));
-        let draggableLeft = parseInt(getComputedStyle(elmnt).getPropertyValue('left').slice(0, -2));
-        let sheldWidth = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sheldWidth').slice(0, -2));
-        let topBarFirstX = (winWidth - sheldWidth) / 2;
-        let topBarLastX = topBarFirstX + sheldWidth;
-
-        //set the lowest and most-right pixel the element touches
-        let maxX = (draggableWidth + draggableLeft);
-        let maxY = (draggableHeight + draggableTop);
-
-        // calculate the new cursor position:
         e = e || window.event;
         e.preventDefault();
 
-        pos1 = pos3 - e.clientX;    //X change amt
-        pos2 = pos4 - e.clientY;    //Y change amt
+        pos1 = pos3 - e.clientX;    //X change amt (-1 or 1)
+        pos2 = pos4 - e.clientY;    //Y change amt (-1 or 1)
         pos3 = e.clientX;   //new mouse X
         pos4 = e.clientY;   //new mouse Y
 
+        elmnt.attr('data-dragged', 'true');
 
+        //first set css to computed values to avoid CSS NaN results from 'auto', etc
+        elmnt.css('left', (elmnt.offset().left) + "px");
+        elmnt.css("top", (elmnt.offset().top) + "px");
 
-        //fix over/underflows:
+        //then update element position styles to account for drag changes
+        elmnt.css('margin', 'unset');
+        elmnt.css('left', (elmnt.offset().left - pos1) + "px");
+        elmnt.css("top", (elmnt.offset().top - pos2) + "px");
+        elmnt.css("right", ((winWidth - maxX) + "px"));
+        elmnt.css("bottom", ((winHeight - maxY) + "px"));
 
-        setTimeout(function () {
-            if (elmnt.offsetTop < 40) {
-                /* console.log('6'); */
-                if (maxX > topBarFirstX && maxX < topBarLastX) {
-                    /* console.log('maxX inside topBar!'); */
-                    elmnt.style.top = "42px";
-                }
-                if (elmnt.offsetLeft < topBarLastX && elmnt.offsetLeft > topBarFirstX) {
-                    /* console.log('offsetLeft inside TopBar!'); */
-                    elmnt.style.top = "42px";
-                }
-            }
+        // Height/Width here are for visuals only, and are not saved to settings
+        // required because some divs do hot have a set width/height..
+        // and will defaults to shrink to min value of 100px set in CSS file
+        elmnt.css('height', height + "px")
+        elmnt.css('width', width + "px")
 
-            if (elmnt.offsetTop - pos2 <= 0) {
-                /* console.log('1'); */
-                //prevent going out of window top + 42px barrier for TopBar (can hide grabber)
-                elmnt.style.top = "0px";
-            }
-
-            if (elmnt.offsetLeft - pos1 <= 0) {
-                /* console.log('2'); */
-                //prevent moving out of window left
-                elmnt.style.left = "0px";
-            }
-
-            if (maxX >= winWidth) {
-                /* console.log('3'); */
-                //bounce off right
-                elmnt.style.left = elmnt.offsetLeft - 10 + "px";
-            }
-
-            if (maxY >= winHeight) {
-                /* console.log('4'); */
-                //bounce off bottom
-                elmnt.style.top = elmnt.offsetTop - 10 + "px";
-                if (elmnt.offsetTop - pos2 <= 40) {
-                    /* console.log('5'); */
-                    //prevent going out of window top + 42px barrier for TopBar (can hide grabber)
-                    /* console.log('caught Y bounce to <40Y top'); */
-                    elmnt.style.top = "20px";
-                }
-            }
-            // if no problems, set element's new position
-            /* console.log('7'); */
-
-            elmnt.style.left = (elmnt.offsetLeft - pos1) + "px";
-            elmnt.style.top = (elmnt.offsetTop - pos2) + "px";
-            $(elmnt).css("bottom", "unset");
-            $(elmnt).css("right", "unset");
-            $(elmnt).css("margin", "unset");
-
-            /*             console.log(`
-                                        offsetLeft: ${elmnt.offsetLeft}, offsetTop: ${elmnt.offsetTop}
-                                        winWidth: ${winWidth}, winHeight: ${winHeight}
-                                        sheldWidth: ${sheldWidth}
-                                        X: ${elmnt.style.left} 
-                                        Y: ${elmnt.style.top} 
-                                        MaxX: ${maxX}, MaxY: ${maxY} 
-                                        Topbar 1st X: ${((winWidth - sheldWidth) / 2)} 
-                                        TopBar lastX: ${((winWidth - sheldWidth) / 2) + sheldWidth}
-                                            `); */
-
-
-
-        }, 50)
-
-        /* console.log("left/top: " + (elmnt.offsetLeft - pos1) + "/" + (elmnt.offsetTop - pos2) +
-            ", win: " + winWidth + "/" + winHeight +
-            ", max X / Y: " + maxX + " / " + maxY); */
-
+        /*  console.log(`
+             winWidth: ${winWidth}, winHeight: ${winHeight}
+             sheldWidth: ${sheldWidth}
+             X: ${$(elmnt).css('left')}
+             Y: ${$(elmnt).css('top')}
+             MaxX: ${maxX}, MaxY: ${maxY}
+             Topbar 1st X: ${((winWidth - sheldWidth) / 2)}
+             TopBar lastX: ${((winWidth - sheldWidth) / 2) + sheldWidth}
+             `); */
+        return
     }
 
     function closeDragElement() {
-        // stop moving when mouse button is released:
-        document.onmouseup = null;
-        document.onmousemove = null;
-        //revert scrolling to normal after drag to allow recovery of vastly misplaced elements
-        $("body").css("overflow", "auto");
+        console.debug('drag finished')
+        hasBeenDraggedByUser = false;
+        isMouseDown = false;
+        $(document).off('mouseup', closeDragElement);
+        $(document).off('mousemove', elementDrag);
+        $("body").css("overflow", "");
+        // Clear the "data-dragged" attribute
+        elmnt.attr('data-dragged', 'false');
+        console.debug(`Saving ${elmntName} UI position`)
+        saveSettingsDebounced();
 
+    }
+}
+
+export async function initMovingUI() {
+    if (isMobile() === false && power_user.movingUI === true) {
+        console.debug('START MOVING UI')
+        dragElement($("#sheld"));
+        dragElement($("#left-nav-panel"));
+        dragElement($("#right-nav-panel"));
+        dragElement($("#WorldInfo"));
+        await delay(1000)
+        console.debug('loading AN draggable function')
+        dragElement($("#floatingPrompt"))
     }
 }
 
@@ -595,7 +680,9 @@ function dragElement(elmnt) {
 $("document").ready(function () {
 
     // initial status check
-    setTimeout(RA_checkOnlineStatus, 100);
+    setTimeout(() => {
+        RA_checkOnlineStatus();
+    }, 100);
 
     // read the state of AutoConnect and AutoLoadChat.
     $(AutoConnectCheckbox).prop("checked", LoadLocalBool("AutoConnectEnabled"));
@@ -651,14 +738,14 @@ $("document").ready(function () {
     $(WIPanelPin).on("click", function () {
         SaveLocal("WINavLockOn", $(WIPanelPin).prop("checked"));
         if ($(WIPanelPin).prop("checked") == true) {
-            console.log('adding pin class to WI');
+            console.debug('adding pin class to WI');
             $(WorldInfo).addClass('pinnedOpen');
         } else {
-            console.log('removing pin class from WI');
+            console.debug('removing pin class from WI');
             $(WorldInfo).removeClass('pinnedOpen');
 
             if ($(WorldInfo).hasClass('openDrawer') && $('.openDrawer').length > 1) {
-                console.log('closing WI after lock removal');
+                console.debug('closing WI after lock removal');
                 $(WorldInfo).slideToggle(200, "swing");
                 //$(WorldInfoDrawerIcon).toggleClass('openIcon closedIcon');
                 $(WorldInfo).toggleClass('openDrawer closedDrawer');
@@ -673,7 +760,7 @@ $("document").ready(function () {
         $(RightNavPanel).addClass('pinnedOpen');
     }
     if ($(RPanelPin).prop('checked' == true)) {
-        console.log('setting pin class via checkbox state');
+        console.debug('setting pin class via checkbox state');
         $(RightNavPanel).addClass('pinnedOpen');
     }
     // read the state of left Nav Lock and apply to leftnav classlist
@@ -683,7 +770,7 @@ $("document").ready(function () {
         $(LeftNavPanel).addClass('pinnedOpen');
     }
     if ($(LPanelPin).prop('checked' == true)) {
-        console.log('setting pin class via checkbox state');
+        console.debug('setting pin class via checkbox state');
         $(LeftNavPanel).addClass('pinnedOpen');
     }
 
@@ -695,7 +782,7 @@ $("document").ready(function () {
     }
 
     if ($(WIPanelPin).prop('checked' == true)) {
-        console.log('setting pin class via checkbox state');
+        console.debug('setting pin class via checkbox state');
         $(WorldInfo).addClass('pinnedOpen');
     }
 
@@ -751,7 +838,7 @@ $("document").ready(function () {
         SaveLocal('ActiveGroup', $(this).data('id'));
     });
 
-    //this makes the chat input text area resize vertically to match the text size (limited by CSS at 50% window height)    
+    //this makes the chat input text area resize vertically to match the text size (limited by CSS at 50% window height)
     $('#send_textarea').on('input', function () {
         this.style.height = '40px';
         this.style.height = (this.scrollHeight) + 'px';
@@ -782,7 +869,7 @@ $("document").ready(function () {
     function isInputElementInFocus() {
         //return $(document.activeElement).is(":input");
         var focused = $(':focus');
-        if (focused.is('input') || focused.is('textarea') || focused.attr('contenteditable') == 'true') {
+        if (focused.is('input') || focused.is('textarea') || focused.prop('contenteditable') == 'true') {
             if (focused.attr('id') === 'send_textarea') {
                 return false;
             }
@@ -805,16 +892,40 @@ $("document").ready(function () {
                 Generate();
             }
         }
-
-        if (event.ctrlKey && event.key == "Enter") {
-            // Ctrl+Enter for Regeneration Last Response
-            if (is_send_press == false) {
-                $('#option_regenerate').click();
-                $('#options').hide();
-            }
+        //ctrl+shift+up to scroll to context line
+        if (event.shiftKey && event.ctrlKey && event.key == "ArrowUp") {
+            event.preventDefault();
+            let contextLine = $('.lastInContext');
+            if (contextLine.length !== 0) {
+                $('#chat').animate({
+                    scrollTop: contextLine.offset().top - $('#chat').offset().top + $('#chat').scrollTop()
+                }, 300);
+            } else { toastr.warning('Context line not found, send a message first!'); }
+        }
+        //ctrl+shift+down to scroll to bottom of chat
+        if (event.shiftKey && event.ctrlKey && event.key == "ArrowDown") {
+            event.preventDefault();
+            $('#chat').animate({
+                scrollTop: $('#chat').prop('scrollHeight')
+            }, 300);
         }
 
-        if (event.ctrlKey && event.key == "ArrowLeft") {        //for debug, show all local stored vars
+        // Ctrl+Enter for Regeneration Last Response. If editing, accept the edits instead
+        if (event.ctrlKey && event.key == "Enter") {
+            const editMesDone = $(".mes_edit_done:visible");
+            if (editMesDone.length > 0) {
+                console.debug("Accepting edits with Ctrl+Enter");
+                editMesDone.trigger('click');
+            } else if (is_send_press == false) {
+                console.debug("Regenerating with Ctrl+Enter");
+                $('#option_regenerate').click();
+                $('#options').hide();
+            } else {
+                console.debug("Ctrl+Enter ignored");
+            }
+        }
+        //ctrl+left to show all local stored vars (debug)
+        if (event.ctrlKey && event.key == "ArrowLeft") {
             CheckLocal();
         }
 
@@ -842,7 +953,7 @@ $("document").ready(function () {
         }
 
         if (event.ctrlKey && event.key == "ArrowUp") { //edits last USER message if chatbar is empty and focused
-            console.log('got ctrl+uparrow input');
+            console.debug('got ctrl+uparrow input');
             if (
                 $("#send_textarea").val() === '' &&
                 chatbarInFocus === true &&
